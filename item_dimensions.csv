@@ -1,0 +1,5 @@
+Item,Weight,Length,Width,Height,ShipAloneQty,UOM
+ItemA, 1.65,14,9,2.5,,1
+ItemB,0.1005,17,12,5,,100
+ItemC,26,11,11,25,1,1
+ItemD,1.52,34,11,29,25,25
