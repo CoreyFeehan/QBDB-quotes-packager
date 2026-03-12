@@ -1,8 +1,16 @@
 # QBDB-quotes-packager
 Pull Quotes from QuickBooks using QODBC to determine what box(es) items are going into.
 
-item_dimensions is where Item dimensions go obviosuly, but it will also need Unit of Measure for each item, if it differs from QuickBooks.
-Our QuickBooks is set to every item is 1 so we need to know if a pack of 100 can be broken into different boxes or not.
+item_dimensions.csv is where Item dimensions go obviosuly, but it will also need Unit of Measure for each item, if it differs from QuickBooks.
+Our QuickBooks is set to every item is 1, so a pack of 100 bags would be 100, and a pair of gloves would be 2.
+So we need to know if 100 of an item can be broken into two boxes or if that 100 is a pack that can't be broken up.
 We also need to denote if an item ships by itself and how many of that item will be going in it's own box.
 
-available boxes just tells us what box sizes are available to pack into.
+available_boxes.csv just tells us what box sizes are available to pack into.
+
+config.py contains your API key for shippo
+
+on the main app(BoxShipping.py) there are few lines to edit that might matter.
+MAX_BOX_WEIGHT tells us what max weight we are wanting per box, I set it to 40 lbs per box max.
+SHIP_FROM has your shipping address so shippo knows where we are shipping from.
+in the function for pack_items there is an ignore list that can be edited to ignore items so they don't try to get thrown into a box, I remove shipping and other non item items like note is an item we have quickbooks that needs to be ignored.
