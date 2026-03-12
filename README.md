@@ -14,3 +14,5 @@ on the main app(BoxShipping.py) there are few lines to edit that might matter.
 MAX_BOX_WEIGHT tells us what max weight we are wanting per box, I set it to 40 lbs per box max.
 SHIP_FROM has your shipping address so shippo knows where we are shipping from.
 in the function for pack_items there is an ignore list that can be edited to ignore items so they don't try to get thrown into a box, I remove shipping and other non item items like note is an item we have quickbooks that needs to be ignored.
+
+QODBC - You'll need to make sure QuickBooks is open and running on the device this app runs on. And you'll have to be able to allow the app permissions in QuickBooks the first time it runs.
