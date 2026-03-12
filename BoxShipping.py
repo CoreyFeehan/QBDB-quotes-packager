@@ -9,7 +9,6 @@ from shippo import Shippo
 from shippo.models import components
 from config import SHIPPO_API_KEY
 
-
 warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
 
 # -----------------------------
@@ -34,10 +33,9 @@ SHIP_FROM = {
 # LOAD DATA
 # -----------------------------
 
-@st.cache_data
 def load_items():
 
-    df = pd.read_csv("item_dimensions.csv")
+    df = pd.read_csv("item_dimensions.csv", engine="python")
 
     numeric = ["Weight","Length","Width","Height","UOM","ShipAloneQty"]
 
@@ -50,10 +48,9 @@ def load_items():
     return df
 
 
-@st.cache_data
 def load_boxes():
 
-    df = pd.read_csv("available_boxes.csv")
+    df = pd.read_csv("available_boxes.csv", engine="python")
 
     df["Length"] = pd.to_numeric(df["Length"])
     df["Width"] = pd.to_numeric(df["Width"])
@@ -450,3 +447,4 @@ if st.button("Calculate Shipping"):
         st.write(
             f"{r.servicelevel.name} — ${r.amount} ({r.estimated_days} days)"
         )
+
