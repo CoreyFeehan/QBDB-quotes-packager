@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import pyodbc
-import shippo
 import itertools
 import math
 import warnings
@@ -447,4 +446,5 @@ if st.button("Calculate Shipping"):
         st.write(
             f"{r.servicelevel.name} — ${r.amount} ({r.estimated_days} days)"
         )
+
 
