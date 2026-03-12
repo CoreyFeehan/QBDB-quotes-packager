@@ -1,5 +1,5 @@
 # QBDB-quotes-packager
-Pull Quotes from QuickBooks using QODBC to determine what box(es) items are going into.
+Pull Quotes from QuickBooks using QODBC to determine what box(es) items are going into, and return a shipping quote using our fedex account.
 
 item_dimensions.csv is where Item dimensions go obviosuly, but it will also need Unit of Measure for each item, if it differs from QuickBooks.
 Our QuickBooks is set to every item is 1, so a pack of 100 bags would be 100, and a pair of gloves would be 2.
@@ -16,3 +16,6 @@ SHIP_FROM has your shipping address so shippo knows where we are shipping from.
 in the function for pack_items there is an ignore list that can be edited to ignore items so they don't try to get thrown into a box, I remove shipping and other non item items like note is an item we have quickbooks that needs to be ignored.
 
 QODBC - You'll need to make sure QuickBooks is open and running on the device this app runs on. And you'll have to be able to allow the app permissions in QuickBooks the first time it runs.
+
+shippo - you will need to acquire a shippo developer API key, you can use the test key for testing purposes but it won't display fedex quotes until you get a developer key.
+Also you will need to connect you business's shipping accounts on shippo's website to get your rates for shipping.
