@@ -1,20 +1,42 @@
 import streamlit as st
 import pandas as pd
 import pyodbc
-import warnings
+import shippo
 import itertools
 import math
+import warnings
+from shippo import Shippo
+from shippo.models import components
+from config import SHIPPO_API_KEY
+
 
 warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
 
+# -----------------------------
+# CONFIG
+# -----------------------------
+
 MAX_BOX_WEIGHT = 40
+
+shippo_client = Shippo(api_key_header=SHIPPO_API_KEY)
+
+SHIP_FROM = {
+    "name": "Warehouse",
+    "street1": "Your Street",
+    "city": "Your City",
+    "state": "Your State Abbreviation",
+    "zip": "Your Zip",
+    "country": "US"
+}
 
 
 # -----------------------------
 # LOAD DATA
 # -----------------------------
 
+@st.cache_data
 def load_items():
+
     df = pd.read_csv("item_dimensions.csv")
 
     numeric = ["Weight","Length","Width","Height","UOM","ShipAloneQty"]
@@ -28,6 +50,7 @@ def load_items():
     return df
 
 
+@st.cache_data
 def load_boxes():
 
     df = pd.read_csv("available_boxes.csv")
@@ -38,12 +61,9 @@ def load_boxes():
 
     df["Volume"] = df["Length"] * df["Width"] * df["Height"]
 
-    df = df.sort_values("Volume")
-
-    return df
+    return df.sort_values("Volume")
 
 
-# Load each run (no cache)
 items_df = load_items()
 boxes_df = load_boxes()
 
@@ -53,6 +73,7 @@ boxes_df = load_boxes()
 # -----------------------------
 
 def qb_conn():
+
     return pyodbc.connect(
         "DSN=QuickBooks Data;",
         autocommit=True
@@ -60,238 +81,305 @@ def qb_conn():
 
 
 def get_estimate_header(quote):
-    conn = None
+
+    conn=None
+
     try:
+
         conn = qb_conn()
-        query = f"""
+
+        query=f"""
         SELECT
-            TxnID,
-            ShipAddressAddr1 AS Street,
-            ShipAddressCity AS City,
-            ShipAddressState AS State,
-            ShipAddressPostalCode AS Zip
+        TxnID,
+        ShipAddressAddr1 AS Street,
+        ShipAddressCity AS City,
+        ShipAddressState AS State,
+        ShipAddressPostalCode AS Zip
         FROM Estimate
-        WHERE RefNumber = '{quote}'
+        WHERE RefNumber='{quote}'
         """
-        df = pd.read_sql(query, conn)
+
+        df=pd.read_sql(query,conn)
+
         return df
+
     finally:
+
         if conn:
             conn.close()
 
 
 def get_estimate_lines(txn):
-    conn = None
+
+    conn=None
+
     try:
-        conn = qb_conn()
-        query = f"""
+
+        conn=qb_conn()
+
+        query=f"""
         SELECT
-            EstimateLineItemRefFullName AS Item,
-            EstimateLineQuantity AS Qty
+        EstimateLineItemRefFullName AS Item,
+        EstimateLineQuantity AS Qty
         FROM EstimateLine
-        WHERE TxnID = '{txn}'
+        WHERE TxnID='{txn}'
         """
-        df = pd.read_sql(query, conn)
+
+        df=pd.read_sql(query,conn)
+
         return df
+
     finally:
+
         if conn:
             conn.close()
 
 
 # -----------------------------
-# FIND SMALLEST BOX
+# ROTATIONS
 # -----------------------------
 
-def rotations(l, w, h):
-    """Return all unique rotations of a box."""
-    return list(set(itertools.permutations([l, w, h], 3)))
+def rotations(l,w,h):
 
-
-def find_box(length, width, height):
-
-    item_volume = length * width * height
-
-    best_box = None
-    best_waste = None
-    best_rotation = None
-
-    for rot in rotations(length, width, height):
-
-        rl, rw, rh = rot
-
-        for _, box in boxes_df.iterrows():
-
-            if (
-                rl <= box.Length
-                and rw <= box.Width
-                and rh <= box.Height
-            ):
-
-                box_volume = box.Volume
-                waste = box_volume - item_volume
-
-                if best_waste is None or waste < best_waste:
-
-                    best_box = box
-                    best_waste = waste
-                    best_rotation = rot
-
-    # If nothing fits, use the largest box
-    if best_box is None:
-
-        largest = boxes_df.iloc[-1]
-
-        return (
-            largest.BoxName,
-            (largest.Length, largest.Width, largest.Height),
-            (length, width, height)
-        )
-
-    return (
-        best_box.BoxName,
-        (best_box.Length, best_box.Width, best_box.Height),
-        best_rotation
-    )
+    return list(set(itertools.permutations([l,w,h],3)))
 
 
 # -----------------------------
-# PACKING ALGORITHM
+# PACK ITEMS
 # -----------------------------
 
 def pack_items(lines):
-    # Merge with item dimensions
-    merged = lines.merge(items_df, on="Item", how="left")
 
-    # Ignore shipping or note rows
-    ignore = ["shipping", "a-intlterms", "a-note"]
-    merged = merged[~merged["Item"].str.lower().isin(ignore)]
-    merged = merged[(merged["Qty"].notna()) & (merged["Qty"] > 0)]
+    merged=lines.merge(items_df,on="Item",how="left")
 
-    expanded = []
+    ignore=["shipping"]
 
-    # Expand quantities, handle ShipAloneQty
+    merged=merged[~merged["Item"].str.lower().isin(ignore)]
+    merged=merged[(merged["Qty"].notna()) & (merged["Qty"]>0)]
+
+    expanded=[]
+
     for r in merged.itertuples():
-        qty = int(r.Qty)
-        weight = r.Weight
-        dims = (r.Length, r.Width, r.Height)
-        uom = int(r.UOM) if not pd.isna(r.UOM) and r.UOM > 0 else 1
-        ship_alone = int(r.ShipAloneQty) if not pd.isna(r.ShipAloneQty) else 0
 
-        if ship_alone > 0:
-            # Each "ship alone" batch is a separate parcel
-            full = qty // ship_alone
-            remainder = qty % ship_alone
+        qty=int(r.Qty)
+
+        weight=r.Weight
+
+        dims=(r.Length,r.Width,r.Height)
+
+        uom=int(r.UOM) if not pd.isna(r.UOM) and r.UOM>0 else 1
+
+        ship_alone=int(r.ShipAloneQty) if not pd.isna(r.ShipAloneQty) else 0
+
+
+        if ship_alone>0:
+
+            full=qty//ship_alone
+            remainder=qty%ship_alone
+
             for _ in range(full):
-                expanded.append({
-                    "item": r.Item,
-                    "qty": ship_alone,
-                    "weight": ship_alone * weight,
-                    "dims": dims,
-                    "alone": True
-                })
-            qty = remainder
 
-        # Handle remaining qty normally
-        if qty > 0:
-            groups = qty // uom
-            remainder = qty % uom
+                expanded.append({
+                    "item":r.Item,
+                    "qty":ship_alone,
+                    "weight":ship_alone*weight,
+                    "dims":dims,
+                    "alone":True
+                })
+
+            qty=remainder
+
+
+        if qty>0:
+
+            groups=qty//uom
+            remainder=qty%uom
+
             for _ in range(groups):
+
                 expanded.append({
-                    "item": r.Item,
-                    "qty": uom,
-                    "weight": uom * weight,
-                    "dims": dims,
-                    "alone": False
-                })
-            if remainder > 0:
-                expanded.append({
-                    "item": r.Item,
-                    "qty": remainder,
-                    "weight": remainder * weight,
-                    "dims": dims,
-                    "alone": False
+                    "item":r.Item,
+                    "qty":uom,
+                    "weight":uom*weight,
+                    "dims":dims,
+                    "alone":False
                 })
 
-    # Sort largest items first
-    expanded.sort(key=lambda x: x["weight"], reverse=True)
+            if remainder>0:
 
-    # Precompute best rotation per item (min footprint)
+                expanded.append({
+                    "item":r.Item,
+                    "qty":remainder,
+                    "weight":remainder*weight,
+                    "dims":dims,
+                    "alone":False
+                })
+
+
+    expanded.sort(key=lambda x:x["weight"],reverse=True)
+
+
     for item in expanded:
-        item["dims"] = min(rotations(*item["dims"]), key=lambda r: r[0]*r[1])
 
-    parcels = []
+        item["dims"]=min(rotations(*item["dims"]),key=lambda r:r[0]*r[1])
 
-    # Pack items
+
+    parcels=[]
+
+
     for item in expanded:
+
         if item["alone"]:
-            # Ship alone → always new parcel
+
             parcels.append({
-                "items": [item],
-                "weight": item["weight"],
-                "dims": [item["dims"]]
+                "items":[item],
+                "weight":item["weight"],
+                "dims":[item["dims"]]
             })
+
             continue
 
-        # First Fit Decreasing for non-ship-alone items
-        placed = False
+
+        placed=False
+
         for p in parcels:
-            if all(not it["alone"] for it in p["items"]) and p["weight"] + item["weight"] <= MAX_BOX_WEIGHT:
+
+            if all(not it["alone"] for it in p["items"]) and p["weight"]+item["weight"]<=MAX_BOX_WEIGHT:
+
                 p["items"].append(item)
-                p["weight"] += item["weight"]
+
+                p["weight"]+=item["weight"]
+
                 p["dims"].append(item["dims"])
-                placed = True
+
+                placed=True
+
                 break
+
+
         if not placed:
+
             parcels.append({
-                "items": [item],
-                "weight": item["weight"],
-                "dims": [item["dims"]]
+                "items":[item],
+                "weight":item["weight"],
+                "dims":[item["dims"]]
             })
 
-    # Assign boxes
-    results = []
+
+    results=[]
+
+
     for p in parcels:
-        # Approximate parcel dimensions using a square footprint heuristic
-        total_area = sum(l*w for l, w, h in p["dims"])
-        max_length = max(l for l, w, h in p["dims"])
-        max_width = max(w for l, w, h in p["dims"])
-        max_height = max(h for l, w, h in p["dims"])
 
-        # Estimate a roughly square layout for L and W
-        side = math.ceil(math.sqrt(total_area))
-        L = max(side, max_length)
-        W = max(side, max_width)
-        H = max_height
+        total_area=sum(l*w for l,w,h in p["dims"])
 
-        # Ship-alone parcel uses item dims as box
-        if len(p["items"]) == 1 and p["items"][0]["alone"]:
-            item = p["items"][0]
-            box_dims = item["dims"]
-            box_name = f"{box_dims[0]} x {box_dims[1]} x {box_dims[2]}"
-            rotation_used = [box_dims]
+        max_length=max(l for l,w,h in p["dims"])
+        max_width=max(w for l,w,h in p["dims"])
+        max_height=max(h for l,w,h in p["dims"])
+
+        side=math.ceil(math.sqrt(total_area))
+
+        L=max(side,max_length)
+        W=max(side,max_width)
+        H=max_height
+
+
+        if len(p["items"])==1 and p["items"][0]["alone"]:
+
+            dims=p["items"][0]["dims"]
+
+            box_name=f"{dims[0]} x {dims[1]} x {dims[2]}"
+
+            box_dims=dims
+
         else:
-            # Use first box that fits
-            box_found = None
-            for _, box in boxes_df.iterrows():
-                if L <= box.Length and W <= box.Width and H <= box.Height:
-                    box_found = box
-                    break
-            if box_found is None:
-                box_found = boxes_df.iloc[-1]
 
-            box_name = box_found.BoxName
-            box_dims = (box_found.Length, box_found.Width, box_found.Height)
-            rotation_used = [item["dims"] for item in p["items"]]
+            box_found=None
+
+            for _,box in boxes_df.iterrows():
+
+                if L<=box.Length and W<=box.Width and H<=box.Height:
+
+                    box_found=box
+                    break
+
+            if box_found is None:
+                box_found=boxes_df.iloc[-1]
+
+            box_name=box_found.BoxName
+
+            box_dims=(box_found.Length,box_found.Width,box_found.Height)
+
 
         results.append({
-            "Box": box_name,
-            "BoxDims": box_dims,
-            "RotationUsed": rotation_used,
-            "Weight": round(p["weight"], 2),
-            "Items": p["items"]
+            "Box":box_name,
+            "BoxDims":box_dims,
+            "Weight":round(p["weight"],2),
+            "Items":p["items"]
         })
 
     return results
+
+
+# -----------------------------
+# SHIPPO
+# -----------------------------
+
+def create_shippo_parcels(parcels):
+
+    shippo_parcels = []
+
+    for p in parcels:
+
+        L, W, H = p["BoxDims"]
+
+        parcel = components.ParcelCreateRequest(
+            length=str(L),
+            width=str(W),
+            height=str(H),
+            distance_unit=components.DistanceUnitEnum.IN,
+            weight=str(p["Weight"]),
+            mass_unit=components.WeightUnitEnum.LB
+        )
+
+        shippo_parcels.append(parcel)
+
+    return shippo_parcels
+
+
+def get_fedex_rates(address, parcels):
+
+    address_from = components.AddressCreateRequest(
+        name="Warehouse",
+        street1=SHIP_FROM["street1"],
+        city=SHIP_FROM["city"],
+        state=SHIP_FROM["state"],
+        zip=SHIP_FROM["zip"],
+        country="US"
+    )
+
+    address_to = components.AddressCreateRequest(
+        name="Customer",
+        street1=address["Street"],
+        city=address["City"],
+        state=address["State"],
+        zip=address["Zip"],
+        country="US"
+    )
+
+    shipment_request = components.ShipmentCreateRequest(
+        address_from=address_from,
+        address_to=address_to,
+        parcels=parcels
+    )
+
+    shipment = shippo_client.shipments.create(shipment_request)
+
+    rates = shipment.rates
+
+    fedex_rates = [r for r in rates if r.provider == "FedEx"]
+
+    return fedex_rates
 
 
 # -----------------------------
@@ -300,42 +388,65 @@ def pack_items(lines):
 
 st.title("📦 Shipping Box Planner")
 
-quote = st.text_input("QuickBooks Quote Number")
+quote=st.text_input("QuickBooks Quote Number")
 
-if st.button("Calculate Boxes"):
+if st.button("Calculate Shipping"):
 
     if not quote:
-        st.error("Enter a quote number")
+        st.error("Enter quote number")
         st.stop()
 
-    header = get_estimate_header(quote)
+
+    header=get_estimate_header(quote)
 
     if header.empty:
         st.error("Quote not found")
         st.stop()
 
-    txn = header["TxnID"].iloc[0]
 
-    lines = get_estimate_lines(txn)
+    txn=header["TxnID"].iloc[0]
 
-    parcels = pack_items(lines)
+    lines=get_estimate_lines(txn)
+
+
+    parcels=pack_items(lines)
 
     st.subheader("Ship To")
 
     st.write(header[["Street","City","State","Zip"]])
 
+
     st.subheader("Boxes")
 
-    for i, p in enumerate(parcels, 1):
+    for i,p in enumerate(parcels,1):
+
         st.markdown(f"### Box {i}")
+
         st.write(f"Box Type: {p['Box']}")
         st.write(f"Weight: {p['Weight']} lbs")
 
-        # Combine items with same name
-        combined = {}
-        for it in p["Items"]:
-            name = it["item"]
-            combined[name] = combined.get(name, 0) + it["qty"]
+        combined={}
 
-        for name, qty in combined.items():
+        for it in p["Items"]:
+            combined[it["item"]]=combined.get(it["item"],0)+it["qty"]
+
+        for name,qty in combined.items():
             st.write(f"- {name} x {qty}")
+
+
+    with st.spinner("Getting FedEx Rates..."):
+
+        shippo_parcels=create_shippo_parcels(parcels)
+
+        address=header.iloc[0]
+
+        rates=get_fedex_rates(address,shippo_parcels)
+
+
+    st.subheader("FedEx Rates")
+
+    for r in rates:
+
+        st.write(
+            f"{r.servicelevel.name} — ${r.amount} ({r.estimated_days} days)"
+        )
