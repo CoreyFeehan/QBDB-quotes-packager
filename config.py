@@ -1,0 +1,1 @@
+SHIPPO_API_KEY = "your shippo key"
