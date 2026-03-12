@@ -1,6 +1,10 @@
 import streamlit as st
 import pandas as pd
 import pyodbc
-import warnings
+import shippo
 import itertools
 import math
+import warnings
+from shippo import Shippo
+from shippo.models import components
+from config import SHIPPO_API_KEY
