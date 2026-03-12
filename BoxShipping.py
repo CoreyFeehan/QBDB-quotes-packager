@@ -320,10 +320,14 @@ if shippo_parcels:
     with st.spinner("Getting live FedEx rates from Shippo..."):
         rates = get_fedex_rates(address, shippo_parcels)
     if rates:
-        for r in rates:
+        # Sort FedEx rates from cheapest to most expensive
+        rates_sorted = sorted(rates, key=lambda r: float(r.amount))
+
+        for r in rates_sorted:
             service = r.servicelevel.name
             cost = r.amount
             days = r.estimated_days if r.estimated_days else "N/A"
             st.write(f"**{service}** — ${cost} — {days} day(s)")
     else:
         st.warning("No FedEx rates returned")
+
