@@ -21,3 +21,4 @@ QODBC - You'll need to make sure QuickBooks is open and running on the device th
 
 
 My Company uses FedEx for shipping most boxes, but if we are shipping to a military base we will use USPS as USPS is the only company that can deliver to military bases.
+If you don't need List rate then you can only use shippo, but our sales reps like to see list rate vs our rate for shipping so that is why FedEx API is used
