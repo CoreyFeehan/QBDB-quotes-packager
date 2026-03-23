@@ -3,9 +3,8 @@ import pandas as pd
 import pyodbc
 import warnings
 import math
-from shippo import Shippo
-from shippo.models import components
-from config import SHIPPO_API_KEY
+import requests
+from config import FEDEX_CLIENT_ID, FEDEX_CLIENT_SECRET, FEDEX_ACCOUNT_NUMBER, SHIPPO_API_KEY
 from collections import defaultdict
 
 warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
@@ -14,14 +13,15 @@ warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
 # CONFIG
 # -----------------------------
 MAX_BOX_WEIGHT = 35
-shippo_client = Shippo(api_key_header=SHIPPO_API_KEY)
 SHIP_FROM = {
-    "name": "Warehouse",
-    "street1": "Your Street",
-    "city": "Your City",
-    "state": "Your State",
-    "zip": "Your Zip",
-    "country": "Your Country"
+    "name": "The White House",
+    "street1": "1600 Pennsylvania Ave", #Change to your Zip
+    "city": "Washington", #Change to your Zip
+    "state": "DC", #Change to your Zip
+    "zip": "20500", #Change to your Zip
+    "country": "US",
+    "phone": "5555555555", #Can be any phone number, USPS just needs a phone number
+    "email": "email@gmail.com" #Can be any email, USPS just needs an email
 }
 
 # -----------------------------
@@ -89,6 +89,42 @@ def get_estimate_lines(txn):
         if conn:
             conn.close()
 
+def get_salesorder_header(so_number):
+    conn = None
+    try:
+        conn = qb_conn()
+        query = f"""
+        SELECT
+            TxnID,
+            ShipAddressAddr1 AS Street,
+            ShipAddressCity AS City,
+            ShipAddressState AS State,
+            ShipAddressPostalCode AS Zip,
+            ShipAddressCountry AS Country
+        FROM SalesOrder
+        WHERE RefNumber = '{so_number}'
+        """
+        return pd.read_sql(query, conn)
+    finally:
+        if conn:
+            conn.close()
+
+def get_salesorder_lines(txn):
+    conn = None
+    try:
+        conn = qb_conn()
+        query = f"""
+        SELECT
+            SalesOrderLineItemRefFullName AS Item,
+            SalesOrderLineQuantity AS Qty
+        FROM SalesOrderLine
+        WHERE TxnID = '{txn}'
+        """
+        return pd.read_sql(query, conn)
+    finally:
+        if conn:
+            conn.close()
+
 # -----------------------------
 # PACK ITEMS (3D Packing)
 # -----------------------------
@@ -129,7 +165,7 @@ def pack_items(lines):
     lines = lines.copy()
     lines = lines[lines["Item"].notna()]
     lines = lines[~lines["Item"].str.lower().str.contains(
-        "shipping|training", na=False)]
+        "shipping|a-note|a-intl-terms|repair|a-fsis-training", na=False)]
 
     merged = lines.merge(items_df, on="Item", how="left")
 
@@ -288,61 +324,173 @@ def group_identical_boxes(parcels):
 
 
 # -----------------------------
-# SHIPPO RATES
+# FEDEX RATES
 # -----------------------------
-def create_shippo_parcels(parcels):
-    shippo_parcels = []
-    for p in parcels:
-        dims = p["BoxDims"]
-        parcel = components.ParcelCreateRequest(
-            length=str(float(dims[0])),
-            width=str(float(dims[1])),
-            height=str(float(dims[2])),
-            distance_unit=components.DistanceUnitEnum.IN,
-            weight=str(float(p["Weight"])),
-            mass_unit=components.WeightUnitEnum.LB
-        )
-        shippo_parcels.append(parcel)
-    return shippo_parcels
-
 MILITARY_STATES = {"AE", "AA", "AP"}
 
+FEDEX_SERVICE_NAMES = {
+    "FEDEX_GROUND":         "FedEx Ground",
+    "GROUND_HOME_DELIVERY": "FedEx Home Delivery",
+    "FEDEX_2_DAY":          "FedEx 2Day",
+    "FEDEX_2_DAY_AM":       "FedEx 2Day AM",
+    "FEDEX_EXPRESS_SAVER":  "FedEx Express Saver",
+    "STANDARD_OVERNIGHT":   "FedEx Standard Overnight",
+    "PRIORITY_OVERNIGHT":   "FedEx Priority Overnight",
+    "FIRST_OVERNIGHT":      "FedEx First Overnight",
+}
 
-
-def get_rates(address, parcels):
-    address = (address)
-    state = (address.get("state") or "").strip().upper()
-    is_military = state in MILITARY_STATES
-
-    address_from = components.AddressCreateRequest(**SHIP_FROM)
-    address_to = components.AddressCreateRequest(
-        name="Customer",
-        street1=address["street1"],
-        city=address["city"],
-        state=address["state"],
-        zip=address["zip"],
-        country=address.get("country", "US")
+def get_fedex_token():
+    resp = requests.post(
+        "https://apis.fedex.com/oauth/token",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data={
+            "grant_type": "client_credentials",
+            "client_id": FEDEX_CLIENT_ID,
+            "client_secret": FEDEX_CLIENT_SECRET,
+        }
     )
-    shipment_req = components.ShipmentCreateRequest(
-        address_from=address_from,
-        address_to=address_to,
-        parcels=parcels
-    )
-    shipment = shippo_client.shipments.create(shipment_req)
+    if not resp.ok:
+        raise Exception(f"FedEx auth failed ({resp.status_code}): {resp.text}")
+    return resp.json()["access_token"]
 
-    if is_military:
-        # FedEx does not serve APO/FPO/DPO — filter to USPS only
-        usps_rates = [r for r in shipment.rates if r.provider == "USPS"]
-        if usps_rates:
-            usps_rates.sort(key=lambda r: float(r.amount))
-            return usps_rates
-        return []
-    else:
-        fedex_rates = [r for r in shipment.rates if r.provider == "FedEx"]
-        if fedex_rates:
-            fedex_rates.sort(key=lambda r: float(r.amount))
-            return fedex_rates
-        return sorted(shipment.rates, key=lambda r: float(r.amount))
+def get_fedex_rates(address, parcels):
+    token = get_fedex_token()
+
+    packages = []
+    for i, p in enumerate(parcels):
+        packages.append({
+            "sequenceNumber": i + 1,
+            "weight": {"units": "LB", "value": round(float(p["weight"]), 1)},
+            "dimensions": {
+                "length": int(float(p["length"])),
+                "width": int(float(p["width"])),
+                "height": int(float(p["height"])),
+                "units": "IN"
+            }
+        })
+
+    payload = {
+        "accountNumber": {"value": FEDEX_ACCOUNT_NUMBER},
+        "rateRequestControlParameters": {
+            "returnTransitTimes": True
+        },
+        "requestedShipment": {
+            "shipper": {
+                "address": {
+                    "streetLines": [SHIP_FROM["street1"]],
+                    "city": SHIP_FROM["city"],
+                    "stateOrProvinceCode": SHIP_FROM["state"],
+                    "postalCode": SHIP_FROM["zip"],
+                    "countryCode": SHIP_FROM["country"]
+                }
+            },
+            "recipient": {
+                "address": {
+                    "streetLines": [address["street1"]],
+                    "city": address["city"],
+                    "stateOrProvinceCode": address["state"],
+                    "postalCode": address["zip"],
+                    "countryCode": address.get("country", "US")
+                }
+            },
+            "pickupType": "DROPOFF_AT_FEDEX_LOCATION",
+            "rateRequestType": ["ACCOUNT", "LIST"],
+            "requestedPackageLineItems": packages
+        }
+    }
+
+    resp = requests.post(
+        "https://apis.fedex.com/rate/v1/rates/quotes",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=payload
+    )
+    resp.raise_for_status()
+
+    results = {}
+    for detail in resp.json().get("output", {}).get("rateReplyDetails", []):
+        service_type = detail.get("serviceType", "")
+        transit = (
+            detail.get("operationalDetail", {}).get("transitTime")
+            or detail.get("commit", {}).get("transitDays", {}).get("minimumTransitTime")
+            or "N/A"
+        )
+        entry = {"transit": transit}
+        for shipment_detail in detail.get("ratedShipmentDetails", []):
+            rate_type = shipment_detail.get("rateType")
+            if rate_type == "ACCOUNT":
+                entry["account"] = float(shipment_detail.get("totalNetCharge", 0))
+            elif rate_type == "LIST":
+                entry["list"] = float(shipment_detail.get("totalNetCharge", 0))
+        if entry:
+            results[service_type] = entry
+    return results
+
+def get_usps_rates(address, parcels):
+    """Send one request per parcel — USPS does not support multi-parcel shipments via Shippo."""
+    address_from = {
+        "name": SHIP_FROM["name"],
+        "street1": SHIP_FROM["street1"],
+        "city": SHIP_FROM["city"],
+        "state": SHIP_FROM["state"],
+        "zip": SHIP_FROM["zip"],
+        "country": SHIP_FROM["country"],
+        "phone": SHIP_FROM["phone"],
+        "email": SHIP_FROM["email"]
+    }
+    address_to = {
+        "name": "Customer",
+        "street1": address["street1"],
+        "city": address["city"],
+        "state": address["state"],
+        "zip": address["zip"],
+        "country": address.get("country", "US"),
+    }
+    customs = {
+        "contents_type": "MERCHANDISE",
+        "non_delivery_option": "RETURN",
+        "certify": True,
+        "certify_signer": "Warehouse",
+        "eel_pfc": "NOEEI_30_37_a",
+        "items": [
+            {
+                "description": "General merchandise",
+                "quantity": 1,
+                "net_weight": "1",
+                "mass_unit": "lb",
+                "value_amount": "100",
+                "value_currency": "USD",
+                "origin_country": "US",
+            }
+        ],
+    }
+
+    responses = []
+    for p in parcels:
+        payload = {
+            "address_from": address_from,
+            "address_to": address_to,
+            "parcels": [{
+                "length": str(round(float(p["length"]), 2)),
+                "width": str(round(float(p["width"]), 2)),
+                "height": str(round(float(p["height"]), 2)),
+                "distance_unit": "in",
+                "weight": str(round(float(p["weight"]), 2)),
+                "mass_unit": "lb",
+            }],
+            "customs_declaration": customs,
+            "async": False,
+        }
+        resp = requests.post(
+            "https://api.goshippo.com/shipments/",
+            headers={
+                "Authorization": f"ShippoToken {SHIPPO_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        responses.append((resp.json(), payload))
+
+    return responses
 
 # -----------------------------
 # STREAMLIT UI
@@ -350,24 +498,33 @@ def get_rates(address, parcels):
 st.title("Shipping Quotes")
 
 with st.form("quote_form"):
-    quote = st.text_input("QuickBooks Quote Number")
+    doc_type = st.radio("Transaction Type", ["Estimate", "Sales Order"], horizontal=True)
+    label = "QuickBooks Transaction Number"
+    quote = st.text_input(label, key="doc_number")
     submitted = st.form_submit_button("Calculate Boxes")
 
 if not submitted:
     st.stop()
 if not quote:
-    st.error("Please enter a quote number")
+    st.error("Please enter a number")
     st.stop()
 
 with st.spinner("Querying QuickBooks..."):
-    header = get_estimate_header(quote)
+    if doc_type == "Estimate":
+        header = get_estimate_header(quote)
+    else:
+        header = get_salesorder_header(quote)
+
 if header.empty:
-    st.error("Quote not found")
+    st.error(f"{doc_type} not found")
     st.stop()
 
 txn = header["TxnID"].iloc[0]
 with st.spinner("Loading line items..."):
-    lines = get_estimate_lines(txn)
+    if doc_type == "Estimate":
+        lines = get_estimate_lines(txn)
+    else:
+        lines = get_salesorder_lines(txn)
 
 with st.spinner("Calculating boxes..."):
     parcels, missing_items = pack_items(lines)
@@ -381,7 +538,7 @@ if missing_items:
     st.dataframe(pd.DataFrame({"Missing Items": missing_items}), width='stretch')
 
 st.subheader("📦 Boxes")
-shippo_parcels = []
+api_parcels = []
 groups = group_identical_boxes(parcels)
 
 for (items_key, dims_key), box_list in groups.items():
@@ -396,38 +553,89 @@ for (items_key, dims_key), box_list in groups.items():
         st.write(f"- {item_name} x {qty}")
 
     for _ in range(count):
-        shippo_parcels.append({
+        api_parcels.append({
             "length": dims_key[0],
             "width": dims_key[1],
             "height": dims_key[2],
-            "distance_unit": "in",
             "weight": representative["Weight"],
-            "mass_unit": "lb"
         })
 
-if shippo_parcels:
+if api_parcels:
     state = header["State"].iloc[0].strip().upper() if header["State"].iloc[0] else header["City"].iloc[0].strip().upper()
-    is_military = state in {"AE", "AA", "AP"}
+    is_military = state in MILITARY_STATES
 
-    st.subheader("🚚 Shipping Rates - Our Rate")
-    if is_military:
-        st.info("Military address not supported")
+    st.subheader("🚚 Shipping Rates")
 
     address = {
         "street1": header["Street"].iloc[0],
-        "city": header["City"].iloc[0] if header["City"].iloc[0]  else header["State"].iloc[0],
+        "city": header["City"].iloc[0] if header["City"].iloc[0] else header["State"].iloc[0],
         "state": header["State"].iloc[0] if header["State"].iloc[0] else header["City"].iloc[0],
         "zip": header["Zip"].iloc[0] if header["Zip"].iloc[0] else "00000",
         "country": header["Country"].iloc[0]
     }
-    with st.spinner("Getting Shipping Rates..."):
-        rates = get_rates(address, shippo_parcels)
-    if rates:
-        for r in rates:
-            service = r.servicelevel.name
-            cost = r.amount
-            days = r.estimated_days or "N/A"
-            provider = r.provider
-            st.write(f"**{service}** — ${cost} — {days} day(s) — {provider}")
+
+    if is_military:
+        st.info("Military address (APO/FPO/DPO) — showing USPS rates only. Insurance not included, insurance is entire cost of all items times .184 ")
+
+        # USPS requires country=US and city=APO/FPO/DPO for military addresses
+        military_address = {**address, "country": "US"}
+        raw_city = (address.get("city") or "").strip().upper()
+        if raw_city not in ("APO", "FPO", "DPO"):
+            military_address["city"] = {"AE": "APO", "AA": "APO", "AP": "FPO"}.get(state, "APO")
+
+        with st.spinner("Getting USPS Rates..."):
+            try:
+                parcel_responses = get_usps_rates(military_address, api_parcels)
+            except Exception as e:
+                parcel_responses = []
+                st.warning(f"Could not retrieve USPS rates: {e}")
+
+        # Aggregate rates by service: sum amounts across all parcels
+        service_totals = {}
+        for raw, _ in parcel_responses:
+            for r in raw.get("rates", []):
+                key = r.get("servicelevel", {}).get("token", "")
+                if key not in service_totals:
+                    service_totals[key] = {
+                        "name": r.get("servicelevel", {}).get("name", "N/A"),
+                        "amount": 0.0,
+                        "estimated_days": r.get("estimated_days"),
+                        "provider": r.get("provider", "USPS"),
+                    }
+                service_totals[key]["amount"] += float(r["amount"])
+
+        usps_rates = list(service_totals.values())
+        if usps_rates:
+            usps_rates.sort(key=lambda r: r["amount"])
+            rate_rows = [
+                {
+                    "Service": r["name"],
+                    "Est. Days": r["estimated_days"] or "N/A",
+                    "Rate": f"${r['amount']:.2f}",
+                }
+                for r in usps_rates
+            ]
+            st.dataframe(pd.DataFrame(rate_rows), hide_index=True, width='stretch')
+        else:
+            st.warning("No rates returned from Shippo")
     else:
-        st.warning("No shipping rates returned")
+        with st.spinner("Getting Shipping Rates..."):
+            try:
+                fedex_rates = get_fedex_rates(address, api_parcels)
+            except Exception as e:
+                fedex_rates = {}
+                st.warning(f"Could not retrieve FedEx rates: {e}")
+
+        if fedex_rates:
+            rate_rows = []
+            for service_type, data in sorted(fedex_rates.items(), key=lambda x: x[1].get("account", 9999)):
+                row = {
+                    "Service": FEDEX_SERVICE_NAMES.get(service_type, service_type),
+                    "Est. Days": data.get("transit", "N/A"),
+                    "Our Rate": f"${data['account']:.2f}" if "account" in data else "N/A",
+                    "List Rate": f"${data['list']:.2f}" if "list" in data else "N/A",
+                }
+                rate_rows.append(row)
+            st.dataframe(pd.DataFrame(rate_rows), hide_index=True, width='stretch')
+        else:
+            st.warning("No shipping rates returned")
