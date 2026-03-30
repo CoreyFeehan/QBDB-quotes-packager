@@ -15,9 +15,9 @@ warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
 MAX_BOX_WEIGHT = 35
 SHIP_FROM = {
     "name": "The White House",
-    "street1": "1600 Pennsylvania Ave", #Change to your Zip
-    "city": "Washington", #Change to your Zip
-    "state": "DC", #Change to your Zip
+    "street1": "1600 Pennsylvania Ave", #Change to your street
+    "city": "Washington", #Change to your city
+    "state": "DC", #Change to your state
     "zip": "20500", #Change to your Zip
     "country": "US",
     "phone": "5555555555", #Can be any phone number, USPS just needs a phone number
